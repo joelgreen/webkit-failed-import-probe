@@ -106,7 +106,8 @@ async function run(variant, mode, rep) {
       await go(pageUrl);
     }
     await waitForNewDoc(s0.docId);
-    r.afterRecover = await execAsync(awaitOpen);
+    // A new tab has its own sessionStorage, so it asks for the chunk itself.
+    r.afterRecover = mode === "newtab" || mode === "closetab" ? await execAsync(importWhileDown, [chunk, deps]) : await execAsync(awaitOpen);
     r.primeMs = await exec("return sessionStorage.getItem('fix1uo:primeMs')");
     r.requested = { chunk: requests(g, `/chunk-${tag}`).length, deps: deps.map((d) => requests(g, d.replace(ORIGIN, "")).length) };
   } catch (e) {
