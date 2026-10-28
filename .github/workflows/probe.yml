@@ -1,0 +1,49 @@
+name: probe
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Environment
+        run: |
+          mkdir -p out
+          {
+            echo "runner: ${{ matrix.os }}"
+            sw_vers
+            echo "Safari: $(defaults read /Applications/Safari.app/Contents/Info.plist CFBundleShortVersionString) ($(defaults read /Applications/Safari.app/Contents/Info.plist CFBundleVersion))"
+            echo "safaridriver: $(safaridriver --version)"
+            echo "Chrome: $('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --version || true)"
+            echo "chromedriver: $($CHROMEWEBDRIVER/chromedriver --version || true)"
+            echo "node: $(node --version)"
+          } | tee out/env.txt
+      - name: Safari
+        run: |
+          sudo safaridriver --enable
+          safaridriver --port 4444 > out/safaridriver.log 2>&1 &
+          SD=$!
+          sleep 2
+          node driver.mjs safari http://127.0.0.1:4444 out || true
+          kill $SD || true
+      - name: Chrome control
+        run: |
+          $CHROMEWEBDRIVER/chromedriver --port=9515 > out/chromedriver.log 2>&1 &
+          CD=$!
+          sleep 2
+          node driver.mjs chrome http://127.0.0.1:9515 out || true
+          kill $CD || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-${{ matrix.os }}
+          path: out/
