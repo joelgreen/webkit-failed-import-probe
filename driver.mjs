@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { variants, names, importScript } from "./variants.mjs";
 
 const [engine, wd, outDir] = process.argv.slice(2);
 const PORT = 8123;
@@ -105,15 +106,8 @@ async function waitForNewDoc(oldDocId) {
   }
   throw new Error("new document did not load");
 }
-async function importUrl(url) {
-  return execAsync(
-    `const cb = arguments[arguments.length - 1];
-     const t0 = performance.now();
-     window.__imp(arguments[0]).then(
-       (m) => cb({ ok: true, v: m.v, ms: Math.round(performance.now() - t0) }),
-       (e) => cb({ ok: false, err: String(e), ms: Math.round(performance.now() - t0) }));`,
-    [url],
-  );
+async function importUrl(url, deps, co) {
+  return execAsync(importScript, [url, deps, co]);
 }
 async function addModulePreload(url) {
   return execAsync(
@@ -130,58 +124,48 @@ async function addModulePreload(url) {
 
 // ---------- variants ----------
 const runId = Math.random().toString(36).slice(2, 8);
-const variants = {
-  a: "plain import() after location.reload()",
-  b: "reload, then <link rel=modulepreload> for chunk, then import()",
-  c: "reload, then import(url + '?r=1') (cache-bust)",
-  d: "location.href = page + '?reload=' + Date.now() instead of reload, then import()",
-  e: "no reload: retry import() in the same document",
-  f: "WebDriver navigate to the same page URL (address-bar style), then import()",
-};
-
 async function runVariant(key) {
-  const chunkPath = `/assets/chunk-${key}-${runId}.js`;
+  const v = variants[key];
+  const { chunkPath, depPath } = names(key, runId, v);
   const chunkUrl = `${ORIGIN}${chunkPath}`;
-  const r = { variant: key, desc: variants[key], chunk: chunkPath };
+  const deps = v.style === "vite" ? (depPath ? [ORIGIN + depPath] : []) : null;
+  const retryDeps = (v.retryStyle ?? v.style) === "vite" ? deps : null;
+  const r = { variant: key, desc: v.desc, chunk: chunkPath, dep: depPath };
   await startServer();
   await newSession();
   try {
     await go(`${ORIGIN}/`);
     const s0 = await waitForNewDoc(undefined);
-    // 1. server down, import fails
     await stopServer();
-    r.downImport = await importUrl(chunkUrl);
-    // 2. server back
+    r.downImport = await importUrl(chunkUrl, deps, v.co);
     const g = await startServer();
     r.restartGen = g;
-    // 3. recovery step
-    if (key === "a" || key === "b" || key === "c") {
+    if (v.recover === "reload") {
       await exec("setTimeout(() => location.reload(), 50); return true;");
       await waitForNewDoc(s0.docId);
-    } else if (key === "d") {
+    } else if (v.recover === "href") {
       await exec("setTimeout(() => { location.href = location.pathname + '?reload=' + Date.now(); }, 50); return true;");
       await waitForNewDoc(s0.docId);
-    } else if (key === "f") {
+    } else if (v.recover === "nav") {
       await go(`${ORIGIN}/`);
       await waitForNewDoc(s0.docId);
     }
     r.pageRequestsAfterRestart = requestsSince(g, "GET /").filter((l) => !l.includes("/assets/")).length;
-    r.entryRequestsAfterRestart = requestsSince(g, "/assets/entry-").length;
-    if (key === "b") r.modulepreload = await addModulePreload(chunkUrl);
-    const target = key === "c" ? `${chunkUrl}?r=1` : chunkUrl;
-    r.retryImport = await importUrl(target);
-    r.chunkRequestsAfterRestart = requestsSince(g, chunkPath).map((l) => l.split(" ").slice(2).join(" "));
-    if (key === "a" && !r.retryImport.ok) {
-      // does a second reload ever recover?
+    if (v.preloadAfter) r.modulepreload = await addModulePreload(chunkUrl);
+    const target = v.bust ? `${chunkUrl}?r=1` : chunkUrl;
+    r.retryImport = await importUrl(target, retryDeps, v.co);
+    const seen = () => ({
+      chunk: requestsSince(g, chunkPath).map((l) => l.split(" ").slice(2).join(" ")),
+      dep: depPath ? requestsSince(g, depPath).map((l) => l.split(" ").slice(2).join(" ")) : [],
+    });
+    r.requestsAfterRestart = seen();
+    if (!r.retryImport.ok && v.recover === "reload") {
       const s1 = await pageState();
       await exec("setTimeout(() => location.reload(), 50); return true;");
       await waitForNewDoc(s1.docId);
-      r.secondReloadImport = await importUrl(chunkUrl);
-      r.chunkRequestsAfterRestart = requestsSince(g, chunkPath).map((l) => l.split(" ").slice(2).join(" "));
+      r.secondReloadImport = await importUrl(target, retryDeps, v.co);
+      r.requestsAfterRestart = seen();
     }
-    r.resourceEntries = await exec(
-      "return performance.getEntriesByType('resource').filter(e => e.name.includes('chunk-')).map(e => e.name + ' ' + Math.round(e.duration) + 'ms')",
-    );
   } catch (e) {
     r.error = String(e && e.stack ? e.stack : e);
   } finally {
@@ -209,16 +193,15 @@ if (!results.sessionError) {
 fs.writeFileSync(path.join(outDir, `results-${engine}.json`), JSON.stringify(results, null, 2));
 
 // summary table
+const short = (x) => (x.ok ? "loaded" : `FAILED (${x.err})`);
 const rows = results.variants.map((v) => {
-  const res = v.error
-    ? `ERROR ${v.error.split("\n")[0]}`
-    : v.retryImport.ok
-      ? "loaded"
-      : `FAILED: ${v.retryImport.err}`;
-  const extra = v.secondReloadImport ? ` | 2nd reload: ${v.secondReloadImport.ok ? "loaded" : "FAILED"}` : "";
-  return `| ${engine} | ${v.variant} | ${v.downImport?.ok === false ? "failed (" + v.downImport.err + ")" : JSON.stringify(v.downImport)} | ${res}${extra} | ${v.chunkRequestsAfterRestart?.length ? "yes (" + v.chunkRequestsAfterRestart.length + ")" : "no"} |`;
+  const res = v.error ? `ERROR ${v.error.split("\n")[0]}` : short(v.retryImport);
+  const extra = v.secondReloadImport ? `; 2nd reload: ${short(v.secondReloadImport)}` : "";
+  const q = v.requestsAfterRestart;
+  const seen = q ? `chunk ${q.chunk.length ? "yes" : "no"}${v.dep ? `, dep ${q.dep.length ? "yes" : "no"}` : ""}` : "?";
+  return `| ${engine} | ${v.variant} | ${v.desc} | ${v.downImport ? short(v.downImport) : "?"} | ${res}${extra} | ${seen} |`;
 });
-const table = ["| engine | variant | import while down | after recovery | chunk request seen |", "|---|---|---|---|---|", ...rows].join("\n");
+const table = ["| engine | variant | what | import while down | after recovery | request seen after restart |", "|---|---|---|---|---|---|", ...rows].join("\n");
 console.log(table);
 fs.writeFileSync(path.join(outDir, `summary-${engine}.md`), table + "\n");
 if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\n### ${engine}\n\n${table}\n`);
