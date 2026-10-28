@@ -1,0 +1,59 @@
+name: fix1uo
+on:
+  workflow_dispatch:
+    inputs:
+      reps_safari:
+        description: runs per variant and recovery mode in Safari
+        default: "8"
+      reps_chrome:
+        description: runs per variant and recovery mode in Chrome (control)
+        default: "4"
+jobs:
+  fix1uo:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Environment
+        run: |
+          mkdir -p out
+          {
+            echo "runner: ${{ matrix.os }}"
+            echo "commit: ${{ github.sha }}"
+            sw_vers
+            echo "Safari: $(defaults read /Applications/Safari.app/Contents/Info.plist CFBundleShortVersionString) ($(defaults read /Applications/Safari.app/Contents/Info.plist CFBundleVersion))"
+            echo "safaridriver: $(safaridriver --version)"
+            echo "Chrome: $('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --version || true)"
+            echo "node: $(node --version)"
+            shasum -a 256 fix1uo/*
+          } | tee out/env.txt
+      - name: Safari
+        run: |
+          sudo safaridriver --enable
+          safaridriver --port 4444 > out/safaridriver.log 2>&1 &
+          SD=$!
+          sleep 2
+          REPS=${{ inputs.reps_safari }} node fix1uo/driver.mjs safari http://127.0.0.1:4444 out || true
+          kill $SD || true
+      - name: Chrome control
+        run: |
+          $CHROMEWEBDRIVER/chromedriver --port=9515 > out/chromedriver.log 2>&1 &
+          CD=$!
+          sleep 2
+          REPS=${{ inputs.reps_chrome }} node fix1uo/driver.mjs chrome http://127.0.0.1:9515 out || true
+          kill $CD || true
+      - name: Tally
+        if: always()
+        run: node fix1uo/read.mjs out | tee out/READ.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fix1uo-${{ matrix.os }}-${{ github.run_attempt }}
+          path: out/
