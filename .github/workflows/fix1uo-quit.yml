@@ -1,0 +1,41 @@
+name: fix1uo-quit
+on:
+  workflow_dispatch:
+    inputs:
+      reps:
+        description: runs per way out
+        default: "8"
+jobs:
+  quit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Environment
+        run: |
+          mkdir -p out
+          {
+            echo "runner: ${{ matrix.os }}"
+            echo "commit: ${{ github.sha }}"
+            sw_vers
+            echo "Safari: $(defaults read /Applications/Safari.app/Contents/Info.plist CFBundleShortVersionString) ($(defaults read /Applications/Safari.app/Contents/Info.plist CFBundleVersion))"
+            echo "node: $(node --version)"
+            shasum -a 256 fix1uo/quit-*.mjs
+          } | tee out/env.txt
+      - name: Safari, opened as a person would
+        run: REPS=${{ inputs.reps }} node fix1uo/quit-driver.mjs out
+      - name: Tally
+        if: always()
+        run: cat out/READ-quit.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fix1uo-quit-${{ matrix.os }}-${{ github.run_attempt }}
+          path: out/
