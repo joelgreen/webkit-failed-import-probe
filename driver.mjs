@@ -146,11 +146,25 @@ async function runVariant(key) {
     } else if (v.recover === "href") {
       await exec("setTimeout(() => { location.href = location.pathname + '?reload=' + Date.now(); }, 50); return true;");
       await waitForNewDoc(s0.docId);
+    } else if (v.recover === "newtab") {
+      const old = await cmd("GET", `/session/${sid}/window`);
+      const nw = await cmd("POST", `/session/${sid}/window/new`, { type: "tab" });
+      await cmd("DELETE", `/session/${sid}/window`);
+      await cmd("POST", `/session/${sid}/window`, { handle: nw.handle });
+      r.newTab = { old, new: nw.handle };
+      await go(`${ORIGIN}/`);
+      await waitForNewDoc(s0.docId);
     } else if (v.recover === "nav") {
       await go(`${ORIGIN}/`);
       await waitForNewDoc(s0.docId);
     }
     r.pageRequestsAfterRestart = requestsSince(g, "GET /").filter((l) => !l.includes("/assets/")).length;
+    if (v.primeFetch)
+      r.primeFetch = await execAsync(
+        `const cb = arguments[arguments.length - 1];
+         Promise.all(arguments[0].map((u) => fetch(u, { cache: "reload" }).then((x) => x.status, (e) => String(e)))).then(cb);`,
+        [[chunkUrl, ...(depPath ? [ORIGIN + depPath] : [])]],
+      );
     if (v.preloadAfter) r.modulepreload = await addModulePreload(chunkUrl);
     const target = v.bust ? `${chunkUrl}?r=1` : chunkUrl;
     r.retryImport = await importUrl(target, retryDeps, v.co);

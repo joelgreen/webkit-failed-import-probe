@@ -4,6 +4,7 @@
 // dep: chunk statically imports a dep chunk.  co: crossorigin="" on the preload links (Vite sets it).
 // recover: reload = location.reload(); href = location.href = page + '?reload=' + Date.now();
 //          nav = WebDriver navigate to the same page URL; none = same document.
+// newtab: open a new tab, close the old one, load the page there. primeFetch: fetch(url, {cache:'reload'}) for chunk + deps before retry.
 // bust: retry imports chunk + '?r=1' (its dep URL is unchanged).  preloadAfter: add a modulepreload link after recovery.
 export const variants = {
   a: { desc: "plain import(), location.reload()", style: "plain", recover: "reload" },
@@ -20,6 +21,8 @@ export const variants = {
   n: { desc: "vite-style with dep, reload, retry plain import(chunk?r=1)", style: "vite", dep: true, co: true, recover: "reload", bust: true, retryStyle: "plain" },
   l: { desc: "vite-style with dep, location.href = page?reload=<now>", style: "vite", dep: true, co: true, recover: "href" },
   m: { desc: "vite-style with dep, navigate to same page URL", style: "vite", dep: true, co: true, recover: "nav" },
+  o: { desc: "vite-style with dep, close tab, open the page in a new tab", style: "vite", dep: true, co: true, recover: "newtab" },
+  q: { desc: "vite-style with dep, reload, fetch(chunk+dep, {cache:'reload'}) before vite-style import", style: "vite", dep: true, co: true, recover: "reload", primeFetch: true },
 };
 
 export function names(key, runId, v) {
