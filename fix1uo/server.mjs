@@ -1,11 +1,12 @@
-// Static server for the fix1uo toy. Usage: node server.mjs <port> <logFile> <generation>
+// Static server for the fix1uo toy. Usage: node server.mjs <port> <logFile> <generation> [slowMs]
 // Asset headers follow the probed app's current static handler: hashed assets are
 // `public, max-age=31536000, immutable` with a weak ETag and Last-Modified (304 on a match),
 // pages are `no-cache` with no validators, and a missing asset is a 404 with `no-store`.
 import http from "node:http";
 import fs from "node:fs";
 
-const [port, logFile, gen] = process.argv.slice(2);
+// slowMs (optional): every chunk and dep answer waits that long, a server slow to send them.
+const [port, logFile, gen, slowMs = "0"] = process.argv.slice(2);
 const started = new Date(Math.floor(Date.now() / 1000) * 1000);
 
 // /default/ and /fix/ load the same entry; the page says whether the fix runs.
@@ -45,7 +46,10 @@ const server = http.createServer((req, res) => {
   }
   if (path === "/assets/entry-f1x1u0.js") return asset(req, res, entry);
   const m = /^\/assets\/(chunk|depa|depb|depc)-([\w-]+)\.js$/.exec(path);
-  if (m) return asset(req, res, moduleFor(m[1], m[2]));
+  if (m) {
+    const send = () => asset(req, res, moduleFor(m[1], m[2]));
+    return Number(slowMs) > 0 ? setTimeout(send, Number(slowMs)) : send();
+  }
   res.writeHead(404, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
   res.end("Not Found");
 });

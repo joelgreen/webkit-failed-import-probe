@@ -6,6 +6,8 @@
 //   refresh WebDriver refresh, the browser's reload
 //   query   location.href = path + "?reload=<now>"
 //   nav     WebDriver navigate to the same URL
+//   app-slow  app, with the restarted server sending each chunk and dep after 1000 ms (past the budget)
+//   newtab / closetab  (default only) a new tab on the same URL, keeping or first closing the stuck tab
 // After recovery the new page asks for the chunk as it boots (entry.js, fix1uo:open).
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -25,9 +27,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let server = null;
 let gen = 0;
 const portOpen = () => new Promise((resolve) => { const s = net.connect(PORT, "127.0.0.1"); s.once("connect", () => (s.destroy(), resolve(true))); s.once("error", () => resolve(false)); });
-async function startServer() {
+async function startServer(slowMs = 0) {
   gen += 1;
-  server = spawn(process.execPath, [path.join(here, "server.mjs"), String(PORT), logFile, String(gen)], { stdio: ["ignore", "ignore", "inherit"] });
+  server = spawn(process.execPath, [path.join(here, "server.mjs"), String(PORT), logFile, String(gen), String(slowMs)], { stdio: ["ignore", "ignore", "inherit"] });
   for (let i = 0; i < 200; i++) { if (await portOpen()) return gen; await sleep(50); }
   throw new Error("server did not start");
 }
@@ -76,6 +78,7 @@ const awaitOpen = `const cb = arguments[arguments.length - 1];
 (window.__openResult || Promise.resolve({ ok: false, err: "no open" })).then(cb);`;
 
 const runId = Math.random().toString(36).slice(2, 8);
+const SLOW_MS = 1000; // app-slow: the restarted server sends each chunk and dep after this long, past the 300 ms budget
 async function run(variant, mode, rep) {
   const tag = `${runId}-${variant}-${mode}-${rep}`;
   const chunk = `${ORIGIN}/assets/chunk-${tag}.js`;
@@ -90,13 +93,21 @@ async function run(variant, mode, rep) {
     await stopServer();
     r.whileDown = await execAsync(importWhileDown, [chunk, deps]);
     await exec("sessionStorage.setItem('fix1uo:open', JSON.stringify({u: arguments[0], deps: arguments[1]})); return true;", [chunk, deps]);
-    const g = await startServer();
-    if (mode === "app") await exec("setTimeout(() => window.__appReload(), 50); return true;");
+    const g = await startServer(mode === "app-slow" ? SLOW_MS : 0);
+    if (mode === "app" || mode === "app-slow") await exec("setTimeout(() => window.__appReload(), 50); return true;");
     if (mode === "refresh") await cmd("POST", `/session/${sid}/refresh`, {});
     if (mode === "query") await exec("setTimeout(() => { location.href = location.pathname + '?reload=' + Date.now(); }, 50); return true;");
     if (mode === "nav") await go(pageUrl);
+    if (mode === "newtab" || mode === "closetab") {
+      // A new tab on the same URL; closetab closes the stuck tab first.
+      const nw = await cmd("POST", `/session/${sid}/window/new`, { type: "tab" });
+      if (mode === "closetab") await cmd("DELETE", `/session/${sid}/window`);
+      await cmd("POST", `/session/${sid}/window`, { handle: nw.handle });
+      await go(pageUrl);
+    }
     await waitForNewDoc(s0.docId);
     r.afterRecover = await execAsync(awaitOpen);
+    r.primeMs = await exec("return sessionStorage.getItem('fix1uo:primeMs')");
     r.requested = { chunk: requests(g, `/chunk-${tag}`).length, deps: deps.map((d) => requests(g, d.replace(ORIGIN, "")).length) };
   } catch (e) {
     r.error = String(e && e.stack ? e.stack : e).slice(0, 500);
@@ -119,8 +130,11 @@ try {
 }
 if (!results.sessionError) {
   for (let rep = 1; rep <= REPS; rep++)
-    for (const variant of ["default", "fix"])
-      for (const mode of ["app", "refresh", "query", "nav"]) results.runs.push(await run(variant, mode, rep));
+    for (const variant of ["default", "fix"]) {
+      for (const mode of ["app", "refresh", "query", "nav", "app-slow"]) results.runs.push(await run(variant, mode, rep));
+      // Workarounds for a stuck tab without the fix, for the release notes.
+      if (variant === "default") for (const mode of ["newtab", "closetab"]) results.runs.push(await run(variant, mode, rep));
+    }
 }
 results.finishedAt = new Date().toISOString();
 fs.writeFileSync(path.join(outDir, `results-${engine}.json`), JSON.stringify(results, null, 2));

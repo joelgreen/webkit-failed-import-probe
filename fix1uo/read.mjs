@@ -1,5 +1,6 @@
 // Tallies fix1uo results against the bar: per OS, "default" must be red in every recovery mode
-// for the cell to be valid, and "fix" must recover in every run of every mode.
+// for the cell to be valid, and "fix" must recover in every run of every mode. app-slow (past the
+// Reload budget) and the default-only newtab/closetab workarounds print as information.
 // Usage: node read.mjs <artifactDir>...   (each holds env.txt and results-<engine>.json)
 import fs from "node:fs";
 import path from "node:path";
@@ -15,7 +16,7 @@ for (const dir of process.argv.slice(2)) {
     const res = JSON.parse(fs.readFileSync(f, "utf8"));
     const browser = engine === "safari" ? `Safari ${safari}` : `${res.capabilities?.browserName} ${res.capabilities?.browserVersion}`;
     if (res.sessionError) { lines.push(`| macOS ${os} | ${browser} | session error: ${res.sessionError} | | | | |`); pass = false; continue; }
-    for (const mode of ["app", "refresh", "query", "nav"]) {
+    for (const mode of ["app", "refresh", "query", "nav", "app-slow", "newtab", "closetab"]) {
       const cell = (variant) => {
         const runs = res.runs.filter((r) => r.variant === variant && r.mode === mode);
         const ok = runs.filter((r) => r.afterRecover?.ok).length;
@@ -25,13 +26,20 @@ for (const dir of process.argv.slice(2)) {
         return { ok, n: runs.length, downFailed, errors, silent, text: `${ok}/${runs.length}${errors ? ` (${errors} errors)` : ""}${silent ? ` (${silent} with no request)` : ""}` };
       };
       const d = cell("default"), x = cell("fix");
+      const primes = res.runs.filter((r) => r.variant === "fix" && r.mode === mode && r.primeMs !== null && r.primeMs !== undefined).map((r) => Number(r.primeMs));
+      const primeText = primes.length ? ` prime ${Math.min(...primes)}-${Math.max(...primes)} ms` : "";
+      if (mode === "app-slow" || mode === "newtab" || mode === "closetab") {
+        // Information: past-budget behavior, and workarounds without the fix.
+        lines.push(`| macOS ${os} | ${browser} | ${mode} (information) | ${d.text} | ${x.n ? x.text : "–"}${primeText} | down failed ${d.downFailed + x.downFailed}/${d.n + x.n} | information |`);
+        continue;
+      }
       let verdict;
       if (engine === "chrome") verdict = x.ok === x.n && d.ok === d.n && x.n > 0 ? "control ok" : "CONTROL ODD";
       else if (d.ok > 0) verdict = d.ok <= 1 && d.n >= 8 ? "valid" : "INVALID (default not red)";
       else verdict = "valid";
       if (engine === "safari") verdict += x.n > 0 && x.ok === x.n && x.errors === 0 ? "; fix PASS" : "; fix FAIL";
       if (/INVALID|FAIL|ODD/.test(verdict)) pass = false;
-      lines.push(`| macOS ${os} | ${browser} | ${mode} | ${d.text} | ${x.text} | down failed ${d.downFailed + x.downFailed}/${d.n + x.n} | ${verdict} |`);
+      lines.push(`| macOS ${os} | ${browser} | ${mode} | ${d.text} | ${x.text}${primeText} | down failed ${d.downFailed + x.downFailed}/${d.n + x.n} | ${verdict} |`);
     }
   }
 }
